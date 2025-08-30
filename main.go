@@ -10,19 +10,24 @@ import (
 )
 
 var (
-	length    int
-	digits    bool
-	symbols   bool
-	lowercase bool
-	uppercase bool
+	length     int
+	digits     bool
+	symbols    bool
+	onlydigits bool
+)
+
+const (
+	lettersUpper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	lettersLower = "abcdefghijklmnopqrstuvwxyz"
+	digitsSet    = "0123456789"
+	symbolsSet   = "!@#$%&*_+-=.?"
 )
 
 func init() {
-	flag.IntVar(&length, "length", 12, "Password length")
-	flag.BoolVar(&digits, "digits", false, "Generate passwords with digits")
-	flag.BoolVar(&symbols, "symbols", false, "Generate passwords with symbols")
-	flag.BoolVar(&lowercase, "lowercase", true, "Generate passwords with lowercase")
-	flag.BoolVar(&uppercase, "uppercase", true, "Generate passwords with uppercase")
+	flag.IntVar(&length, "l", 12, "Password length")
+	flag.BoolVar(&digits, "d", false, "Generate passwords with digits")
+	flag.BoolVar(&symbols, "s", false, "Generate passwords with symbols")
+	flag.BoolVar(&onlydigits, "od", false, "Generate passwords with only digits")
 }
 
 func main() {
@@ -38,50 +43,110 @@ func main() {
 	fmt.Println("Password:", password)
 }
 
+// parseFlags parses the command line flags
 func parseFlags() error {
 	flag.Parse()
 	if length < 1 {
 		return errors.New("length must be greater than zero")
 	}
-	if length > 200 {
-		return errors.New("length must be less than 200")
+	// Increase or justify upper bound; 4096 is reasonable for safety.
+	if length > 4096 {
+		return errors.New("length must be less than or equal to 4096")
+	}
+	// Conflicting flags: onlydigits excludes other classes
+	if onlydigits && (digits || symbols) {
+		return errors.New("conflicting flags: --onlydigits cannot be combined with -d or -s")
 	}
 	return nil
 }
 
+// generatePassword generates a random password with class guarantees
 func generatePassword() (string, error) {
-	password := make([]rune, 0, length)
-	charset, err := buildCharset()
-	if err != nil {
-		return "", err
+	charset, requiredSets := buildCharset()
+	if len(charset) == 0 {
+		return "", errors.New("empty charset: enable at least one character class")
 	}
-	for i := 0; i < length; i++ {
-		idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+	if length < len(requiredSets) {
+		return "", fmt.Errorf("length must be at least %d to include all required classes", len(requiredSets))
+	}
+
+	// Preselect one rune from each required set to guarantee inclusion
+	passwordRunes := make([]rune, 0, length)
+	for _, set := range requiredSets {
+		r, err := randomRuneFrom(set)
 		if err != nil {
 			return "", err
 		}
-		password = append(password, charset[idx.Int64()])
+		passwordRunes = append(passwordRunes, r)
 	}
-	return string(password), nil
+
+	// Fill the rest from the full charset
+	max := big.NewInt(int64(len(charset)))
+	for i := len(passwordRunes); i < length; i++ {
+		idx, err := rand.Int(rand.Reader, max)
+		if err != nil {
+			return "", err
+		}
+		passwordRunes = append(passwordRunes, charset[idx.Int64()])
+	}
+
+	// Secure shuffle so required characters are not all at the beginning
+	if err := cryptoShuffle(passwordRunes); err != nil {
+		return "", err
+	}
+	return string(passwordRunes), nil
 }
 
-func buildCharset() ([]rune, error) {
+// buildCharset builds the charset to use for the password
+// and returns the list of "required" sets to guarantee inclusion.
+func buildCharset() ([]rune, [][]rune) {
+	// only digits mode
+	if onlydigits {
+		return []rune(digitsSet), [][]rune{[]rune(digitsSet)}
+	}
+
 	var charset []rune
-	if lowercase {
-		charset = append(charset, []rune("abcdefghijklmnopqrstuvwxyz")...)
-	}
-	if uppercase {
-		charset = append(charset, []rune("ABCDEFGHIJKLMNOPQRSTUVWXYZ")...)
-	}
+	var requiredSets [][]rune
+
+	// Letters are always included by default
+	letters := []rune(lettersUpper + lettersLower)
+	charset = append(charset, letters...)
+	requiredSets = append(requiredSets, letters) // guarantee at least one letter
+
 	if digits {
-		charset = append(charset, []rune("0123456789")...)
+		d := []rune(digitsSet)
+		charset = append(charset, d...)
+		requiredSets = append(requiredSets, d)
 	}
 	if symbols {
-		charset = append(charset, []rune("!@#$%&*_+-=.?")...)
+		s := []rune(symbolsSet)
+		charset = append(charset, s...)
+		requiredSets = append(requiredSets, s)
 	}
-	if len(charset) == 0 {
-		return nil, errors.New("error: all character types are disabled. " +
-			"Add at least one or do not disable flags -lowercase or -uppercase")
+	return charset, requiredSets
+}
+
+// cryptoShuffle performs Fisher–Yates shuffle using crypto/rand
+func cryptoShuffle(rs []rune) error {
+	for i := len(rs) - 1; i > 0; i-- {
+		jBig, err := rand.Int(rand.Reader, big.NewInt(int64(i+1)))
+		if err != nil {
+			return err
+		}
+		j := int(jBig.Int64())
+		rs[i], rs[j] = rs[j], rs[i]
 	}
-	return charset, nil
+	return nil
+}
+
+func randomRuneFrom(set []rune) (rune, error) {
+	n := len(set)
+	if n == 0 {
+		return 0, errors.New("empty set")
+	}
+	idx, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
+	if err != nil {
+		return 0, err
+	}
+	return set[idx.Int64()], nil
 }
